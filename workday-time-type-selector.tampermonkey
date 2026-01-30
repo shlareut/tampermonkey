@@ -1,0 +1,242 @@
+// ==UserScript==
+// @name         Workday Time-Type-Selector
+// @author       Lars Reuter
+// @namespace    https://github.com/shlareut/tampermonkey/blob/main/workday-time-type-selector.tampermonkey
+// @updateURL    https://raw.githubusercontent.com/shlareut/tampermonkey/main/workday-time-type-selector.tampermonkey
+// @downloadURL  https://raw.githubusercontent.com/shlareut/tampermonkey/main/workday-time-type-selector.tampermonkey
+// @source       https://github.com/shlareut/tampermonkey
+// @version      1.0
+// @description  Quick select recently used Time Types in Workday Time Tracking
+// @match        https://wd103.myworkday.com/cloudflight/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const TIME_TYPE_HISTORY_KEY = 'cf_wd_time_type_history';
+    const CF_WD_TIMETYPE_SELECTION_DIV_KEY = 'cf-wd-timetype-selection';
+    const MAX_RECENT_TIME_TYPES = 5;
+
+    function getRecentTimeTypes() {
+        return GM_getValue(TIME_TYPE_HISTORY_KEY, []);
+    }
+
+    function addTimeTypeToHistory(timeType) {
+        if (!timeType || timeType.trim().length === 0) return;
+
+        let history = getRecentTimeTypes();
+
+        // Remove if already exists (to move it to front)
+        history = history.filter(t => t.toLowerCase() !== timeType.toLowerCase());
+
+        // Add to front
+        history.unshift(timeType);
+
+        // Keep only the last MAX_RECENT_TIME_TYPES
+        history = history.slice(0, MAX_RECENT_TIME_TYPES);
+
+        GM_setValue(TIME_TYPE_HISTORY_KEY, history);
+    }
+
+    function isEnterTimeDialog() {
+        const dialog = document.querySelector('div.wd-popup[role="dialog"][aria-modal="true"]');
+        const title = dialog?.querySelector('[data-automation-id="pageHeaderTitleText"]')?.textContent?.trim();
+        const isOpen = (title === 'Enter Time') && (dialog.offsetParent !== null);
+
+        return isOpen;
+    }
+
+    function getTimeTypeInput() {
+        const label = Array.from(document.querySelectorAll('label')).find(el => el.textContent.trim() === "Time Type");
+        if (!label) return null;
+
+        let input = null;
+
+        const inputId = label.getAttribute('for');
+        if (inputId) {
+            input = document.getElementById(inputId);
+        }
+
+        if (!input) {
+            const container = label.closest('li[role="presentation"]');
+            if (container) {
+                input = container.querySelector('input[data-uxi-widget-type="selectinput"]');
+            }
+        }
+
+        return input;
+    }
+
+    function insertTimeTypeSelection() {
+        const dialog = document.querySelector('div.wd-popup[role="dialog"][aria-modal="true"]');
+        const title = dialog?.querySelector('[data-automation-id="pageHeaderTitleText"]')?.textContent?.trim();
+        const isOpen = (title === 'Enter Time') && (dialog.offsetParent !== null);
+
+        if (!isOpen || !dialog) return;
+
+        const targetDiv = dialog.querySelector('.wd-popup-content');
+        if (!targetDiv) return;
+
+        if (dialog.querySelector(`#${CF_WD_TIMETYPE_SELECTION_DIV_KEY}`)) return;
+
+        const recentTimeTypes = getRecentTimeTypes();
+
+        // Don't show if no history yet
+        if (recentTimeTypes.length === 0) return;
+
+        const newDiv = document.createElement('div');
+        newDiv.id = CF_WD_TIMETYPE_SELECTION_DIV_KEY;
+
+        const pillsHtml = recentTimeTypes.map(timeType =>
+            `<div class="time-type-pill" data-value="${timeType}">${timeType}</div>`
+        ).join('');
+
+        newDiv.innerHTML = `
+        <style>
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} {
+                display: flex; flex-direction: column; align-items: center; justify-content: center; margin: 24px 0;
+            }
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} h3 {
+                margin-bottom: 16px; text-align: center; font-size: 1.2em; color: #333;
+            }
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} .time-type-pills {
+                display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center;
+                max-width: 600px;
+            }
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} .time-type-pill {
+                padding: 8px 18px; border: 1px solid #bbb; border-radius: 20px;
+                background: #f4f4f4; cursor: pointer;
+                transition: background 0.2s, color 0.2s, border-color 0.2s, transform 0.1s;
+                font-weight: 500; font-size: 0.95em;
+                white-space: nowrap;
+            }
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} .time-type-pill:hover {
+                background: #e0e0e0; border-color: #999;
+                transform: translateY(-1px);
+            }
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} .time-type-pill:active {
+                background: #4c8bf5; color: #fff; border-color: #357ae8;
+                transform: translateY(0);
+            }
+            #${CF_WD_TIMETYPE_SELECTION_DIV_KEY} .time-type-pill.loading {
+                opacity: 0.6; pointer-events: none;
+            }
+        </style>
+        <h3>Recent Time Types</h3>
+        <div class="time-type-pills">
+            ${pillsHtml}
+        </div>
+    `;
+
+        targetDiv.prepend(newDiv);
+
+        const pills = newDiv.querySelectorAll('.time-type-pill');
+        pills.forEach(pill => {
+            pill.addEventListener('click', () => {
+                const timeType = pill.dataset.value;
+                selectTimeType(timeType, pill);
+            });
+        });
+    }
+
+    function setNativeValue(element, value) {
+        const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set;
+        const prototype = Object.getPrototypeOf(element);
+        const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+
+        if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+            prototypeValueSetter.call(element, value);
+        } else if (valueSetter) {
+            valueSetter.call(element, value);
+        }
+    }
+
+    function writeTextIntoInputField(inputField, text) {
+        inputField.focus();
+        setNativeValue(inputField, text);
+        inputField.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    function simulateEnterKeyOnInputField(inputField) {
+        inputField.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+        }));
+        inputField.dispatchEvent(new KeyboardEvent('keypress', {
+            key: 'Enter',
+            bubbles: true,
+        }));
+        inputField.dispatchEvent(new KeyboardEvent('keyup', {
+            key: 'Enter',
+            bubbles: true,
+        }));
+    }
+
+    function selectTimeType(timeType, pillElement) {
+        const input = getTimeTypeInput();
+        if (!input) return;
+
+        if (pillElement) {
+            pillElement.classList.add('loading');
+        }
+
+        writeTextIntoInputField(input, timeType);
+        setTimeout(() => {
+            simulateEnterKeyOnInputField(input);
+            if (pillElement) {
+                pillElement.classList.remove('loading');
+            }
+        }, 250);
+    }
+
+    // Track when a time type is selected (to learn from user behavior)
+    function observeTimeTypeSelection() {
+        const label = Array.from(document.querySelectorAll('label')).find(el => el.textContent.trim() === "Time Type");
+        if (!label) return;
+
+        const container = label.closest('li[role="presentation"]');
+        if (!container) return;
+
+        const selectedList = container.querySelector('[data-automation-id="selectedItemList"]');
+        if (!selectedList) return;
+
+        // Check if already observing
+        if (selectedList.dataset.cfObserving) return;
+        selectedList.dataset.cfObserving = 'true';
+
+        const listObserver = new MutationObserver(() => {
+            const selectedItems = selectedList.querySelectorAll('li');
+            if (selectedItems.length > 0) {
+                const selectedText = selectedItems[0].textContent?.trim();
+                if (selectedText) {
+                    addTimeTypeToHistory(selectedText);
+                }
+            }
+        });
+
+        listObserver.observe(selectedList, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    function handleDialogChanges() {
+        if (isEnterTimeDialog()) {
+            insertTimeTypeSelection();
+            setTimeout(observeTimeTypeSelection, 500);
+        }
+    }
+
+    const observer = new MutationObserver(() => {
+        handleDialogChanges();
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    handleDialogChanges();
+})();
